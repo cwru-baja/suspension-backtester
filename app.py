@@ -4,6 +4,8 @@ import time
 import pandas as pd
 import streamlit as st
 
+# streamlit run app.py --server.port 8001 --server.address 0.0.0.0
+
 
 # -----------------------------------------------------------------------------
 # Core configuration for this app.
