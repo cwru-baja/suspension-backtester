@@ -142,9 +142,9 @@ def ensure_state() -> None:
     # Starter code shown in the code editor tab.
     st.session_state.setdefault("code_text", """shock = max(0.0, min(100.0, get_sensor('ThrottlePct')))
 set_each(
-    fl=shock/2 - abs(get_sensor('SteeringAngle', 0.0)/5),
+    fl=abs(shock/2 - abs(get_sensor('SteeringAngle', 0.0)/5)),
     bl=shock/2, 
-    fr=shock/2 - abs(get_sensor('SteeringAngle', 0.0)/5),
+    fr=abs(shock/2 - abs(get_sensor('SteeringAngle', 0.0)/5)),
     br=shock/2
 )
 # see Docs tab for available functions and example scripts""")
@@ -725,9 +725,9 @@ with st.container():
                 height=200,
                 placeholder="""shock = max(0.0, min(100.0, get_sensor('ThrottlePct')))
 set_each(
-    fl=shock/2 - abs(get_sensor('SteeringAngle', 0.0)/5),
+    fl=abs(shock/2 - abs(get_sensor('SteeringAngle', 0.0)/5)),
     bl=shock/2, 
-    fr=shock/2 - abs(get_sensor('SteeringAngle', 0.0)/5),
+    fr=abs(shock/2 - abs(get_sensor('SteeringAngle', 0.0)/5)),
     br=shock/2
 )
 # see Docs tab for available functions and example scripts""",
