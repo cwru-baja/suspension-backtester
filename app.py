@@ -1,9 +1,23 @@
+
+
+
+
+# how to run:
+# 1) pip install streamlit pandas
+# 2) place CSV logs in ./logs relative to this file
+# 3) streamlit run app.py
+
+
+
+
+
+
+
 from pathlib import Path
 import time
 
 import pandas as pd
 import streamlit as st
-
 
 # -----------------------------------------------------------------------------
 # Core configuration for this app.
@@ -45,6 +59,7 @@ class TickValue(int):
     """Integer-like tick value that is also callable for compatibility with time()."""
 
     def __call__(self) -> int:
+        # Return the integer value so user code can call time() like a function.
         return int(self)
 
 
@@ -53,6 +68,7 @@ def list_log_files() -> list[Path]:
     if not LOG_DIR.exists():
         # Missing directory is allowed; UI will show a warning.
         return []
+    # Sort file paths for deterministic dropdown ordering.
     return sorted(LOG_DIR.glob("*.csv"))
 
 
@@ -65,12 +81,14 @@ def load_sensor_log(log_path: Path) -> pd.DataFrame:
 
     # If the user forgot a Time column, we synthesize one as 0..N-1.
     if "Time" not in df.columns:
+        # Insert synthetic tick values if the source file omitted the Time column.
         df.insert(0, "Time", range(len(df)))
 
     # Coerce Time into integer ticks and normalize any bad values to 0.
     df["Time"] = pd.to_numeric(df["Time"], errors="coerce").fillna(0).astype(int)
 
     # Always keep rows sorted by time so slider playback is predictable.
+    # Reset index so downstream code can use row positions safely.
     return df.sort_values("Time").reset_index(drop=True)
 
 
@@ -81,12 +99,15 @@ def init_setpoints_from_sensor_log(sensor_df: pd.DataFrame) -> pd.DataFrame:
         # Safe fallback when no log is loaded yet.
         base = pd.DataFrame({"Time": [0]})
     else:
+        # Copy timeline ticks from the loaded sensor log.
         base = pd.DataFrame({"Time": sensor_df["Time"].astype(int).tolist()})
 
     # Initialize every setpoint column to a known value.
     for col in SETPOINT_COLS:
+        # Seed each wheel setpoint with the configured default value.
         base[col] = DEFAULT_SETPOINT
 
+    # Return a fully initialized output dataframe.
     return base
 
 
@@ -94,15 +115,20 @@ def ensure_state() -> None:
     # Streamlit reruns the script frequently; session_state persists between reruns.
     # We define all app-level state keys here once.
     st.session_state.setdefault("selected_log", None)
+    # Keep a minimal default sensor dataframe so table rendering never crashes.
     st.session_state.setdefault("sensor_log_df", pd.DataFrame({"Time": [0]}))
     st.session_state.setdefault(
         "processed_setpoints_df",
+        # Build output rows that align with sensor timeline ticks.
         init_setpoints_from_sensor_log(st.session_state["sensor_log_df"]),
     )
+    # Track the currently selected timeline tick.
     st.session_state.setdefault("current_time", 0)
     # Mirror key for the interactive timeline slider widget.
     st.session_state.setdefault("timeline_slider", 0)
+    # Track the furthest available time value from the loaded log.
     st.session_state.setdefault("max_time", 0)
+    # Playback switch for the timeline autoplay loop.
     st.session_state.setdefault("play", False)
     # Playback speed in timeline ticks per second.
     st.session_state.setdefault("ticks_per_second", 5.0)
@@ -126,50 +152,66 @@ set_each(
 
 def clamp_time(value: int, max_time: int) -> int:
     # Clamp any user/app timeline movement into valid slider bounds.
+    # Inner min keeps us from going above max_time.
+    # Outer max keeps us from going below zero.
     return max(0, min(int(value), int(max_time)))
 
 
 def sync_timeline_time(value: int) -> None:
     # Canonical timeline state lives in current_time.
+    # Clamp to protect against invalid values from any UI interaction.
     clamped = clamp_time(value, st.session_state["max_time"])
+    # Persist the normalized time back into session state.
     st.session_state["current_time"] = clamped
 
 
 def handle_reset() -> None:
+    # Stop playback before resetting so autoplay does not immediately move again.
     st.session_state["play"] = False
+    # Send timeline to the first tick.
     sync_timeline_time(0)
 
 
 def handle_backstep() -> None:
+    # Stop playback when user manually steps.
     st.session_state["play"] = False
+    # Move one tick left and clamp via sync_timeline_time.
     sync_timeline_time(st.session_state["current_time"] - 1)
 
 
 def handle_frontstep() -> None:
+    # Stop playback when user manually steps.
     st.session_state["play"] = False
+    # Move one tick right and clamp via sync_timeline_time.
     sync_timeline_time(st.session_state["current_time"] + 1)
 
 
 def handle_toggle_play() -> None:
+    # Compute new play state by flipping the old one.
     next_play_state = not st.session_state["play"]
+    # Persist the new play/pause state.
     st.session_state["play"] = next_play_state
 
     if next_play_state:
         # If play is pressed at the end, restart from the beginning.
         if st.session_state["current_time"] >= st.session_state["max_time"]:
             sync_timeline_time(0)
+        # Record the instant playback was resumed.
         st.session_state["last_tick"] = time.time()
 
 
 def handle_timeline_slider_change() -> None:
     # Slider only controls time while paused.
     if st.session_state["play"]:
+        # Ignore slider updates while playback loop owns timeline movement.
         return
+    # Mirror slider selection into canonical timeline state.
     sync_timeline_time(int(st.session_state["timeline_slider"]))
 
 
 def handle_code_text_change() -> None:
     # Apply logic after user stops editing (widget change event).
+    # Flag that code needs to be re-run on next render.
     st.session_state["code_needs_auto_apply"] = True
 
 
@@ -180,16 +222,22 @@ def get_row_at_time(df: pd.DataFrame, current_time: int) -> pd.Series:
     # 2) nearest previous Time <= current_time
     # 3) first row fallback
     if df.empty or "Time" not in df.columns:
+        # Return an empty row-like object when there is no valid time-indexed data.
         return pd.Series(dtype="object")
 
+    # First preference: exact time tick match.
     exact = df[df["Time"] == current_time]
     if not exact.empty:
+        # Use the first exact match row.
         return exact.iloc[0]
 
+    # Second preference: nearest previous row.
     previous = df[df["Time"] <= current_time]
     if not previous.empty:
+        # Use last row not exceeding current_time.
         return previous.iloc[-1]
 
+    # Final fallback: first row if current_time is before all timestamps.
     return df.iloc[0]
 
 
@@ -197,12 +245,16 @@ def get_previous_row(df: pd.DataFrame, current_time: int) -> pd.Series:
     # Return the previous row strictly before current_time.
     # Used for delta calculations in output metrics.
     if df.empty or "Time" not in df.columns:
+        # Return an empty row when no valid prior lookup is possible.
         return pd.Series(dtype="object")
 
+    # Collect rows strictly before the requested tick.
     previous = df[df["Time"] < current_time]
     if previous.empty:
+        # No prior row exists at time zero or before first sample.
         return pd.Series(dtype="object")
 
+    # Return the nearest previous row.
     return previous.iloc[-1]
 
 
@@ -227,47 +279,68 @@ def execute_user_code(
     #
     # Behavior note:
     # - Applies the code across ALL time ticks, not just the currently selected one.
+    # Work on a copy so failures never partially mutate the original dataframe.
     updated = setpoints_df.copy()
 
     if "Time" not in updated.columns:
+        # Ensure output dataframe always has a Time column for tick alignment.
         updated.insert(0, "Time", [current_time] * len(updated) if len(updated) > 0 else [current_time])
 
     # Use the union of times from output + sensor logs so code can process everything available.
+    # Coerce values to ints so tick iteration is stable.
     all_times = set(pd.to_numeric(updated["Time"], errors="coerce").fillna(0).astype(int).tolist())
     if not sensor_df.empty and "Time" in sensor_df.columns:
+        # Include sensor timeline ticks even if output dataframe is missing some.
         all_times.update(pd.to_numeric(sensor_df["Time"], errors="coerce").fillna(0).astype(int).tolist())
     if not all_times:
+        # Guarantee at least one iteration tick.
         all_times = {int(current_time)}
 
+    # Add output rows for any timeline ticks that are currently missing.
     missing_times = sorted(all_times.difference(set(updated["Time"].astype(int).tolist())))
     if missing_times:
+        # Create rows with default setpoints for each missing tick.
         new_rows = [{"Time": t, **{col: DEFAULT_SETPOINT for col in SETPOINT_COLS}} for t in missing_times]
+        # Append missing rows and keep existing rows intact.
         updated = pd.concat([updated, pd.DataFrame(new_rows)], ignore_index=True)
 
     for col in SETPOINT_COLS:
         if col not in updated.columns:
+            # Backfill any missing setpoint columns to maintain output schema.
             updated[col] = DEFAULT_SETPOINT
 
+    # Sort by time so each tick maps to deterministic row order.
     updated = updated.sort_values("Time").reset_index(drop=True)
 
     # Deliberately small set of builtins for safer execution.
     safe_builtins = {
+        # Numeric comparison helper.
         "min": min,
+        # Numeric comparison helper.
         "max": max,
+        # Magnitude helper for sensor deltas.
         "abs": abs,
+        # Precision helper for output rounding.
         "round": round,
+        # Explicit numeric conversion helper.
         "float": float,
+        # Explicit integer conversion helper.
         "int": int,
     }
 
+    # Evaluate user code for each available tick.
     for tick in sorted(all_times):
         # Locate target output row and source sensor row for this tick.
+        # This index points to the row we mutate for this tick.
         row_index = updated.index[updated["Time"].astype(int) == int(tick)][0]
+        # Fetch the best matching sensor row for this tick.
         sensor_row = get_row_at_time(sensor_df, int(tick))
 
         # Helper: set all four setpoints at once.
         def set_all(value: float) -> None:
+            # Apply one value to all wheel corners.
             for col in SETPOINT_COLS:
+                # Write normalized numeric value into each setpoint cell.
                 updated.at[row_index, col] = float(value)
 
         # Helper: set one or more corners individually.
@@ -277,6 +350,7 @@ def execute_user_code(
             bl: float | None = None,
             br: float | None = None,
         ) -> None:
+            # Build mapping between function arguments and output columns.
             mapping = {
                 "FL_Setpoint": fl,
                 "FR_Setpoint": fr,
@@ -285,50 +359,68 @@ def execute_user_code(
             }
             for col, value in mapping.items():
                 if value is not None:
+                    # Only overwrite corners explicitly provided by user code.
                     updated.at[row_index, col] = float(value)
 
         # Helper: fetch a sensor by name with optional default.
         def get_sensor(name: str, default: float = 0.0) -> float:
             if sensor_row.empty:
+                # If no sensor row is available, return fallback immediately.
                 return float(default)
 
+            # Normalize requested sensor name for tolerant matching.
             lookup = str(name).strip().lower()
+            # Initialize as missing until a match is found.
             raw_value = None
 
             # Fast path: exact match as provided.
             if name in sensor_row.index:
+                # Read sensor directly using exact column name.
                 raw_value = sensor_row[name]
             else:
                 # Robust path: case-insensitive + whitespace-insensitive match.
                 for column_name in sensor_row.index:
                     if str(column_name).strip().lower() == lookup:
+                        # Read first normalized-name match.
                         raw_value = sensor_row[column_name]
                         break
 
             if raw_value is None:
+                # Unknown sensor name, use caller-provided fallback.
                 return float(default)
 
             # Treat blank/NA cells as missing sensor values and use default.
             if pd.isna(raw_value):
+                # Missing/NA values are treated as absent sensor data.
                 return float(default)
 
             if isinstance(raw_value, str):
+                # Normalize string sensor values before numeric conversion.
                 raw_value = raw_value.strip()
                 if raw_value == "":
+                    # Empty strings also fall back to default.
                     return float(default)
 
             try:
+                # Convert parsed sensor value into a float for user math.
                 return float(raw_value)
             except (TypeError, ValueError):
+                # Conversion failures are treated as missing sensor values.
                 return float(default)
 
         # Scope exposed to user code.
         runtime_scope = {
+            # API function to set all corners at current tick.
             "set_all": set_all,
+            # API function to set specific corners at current tick.
             "set_each": set_each,
+            # API function to read sensors with fallback handling.
             "get_sensor": get_sensor,
+            # Current tick object; works as both value and callable time().
             "time": TickValue(int(tick)),
+            # Alias for current tick as plain int.
             "current_time": int(tick),
+            # Row-like sensor object for direct indexing in user scripts.
             "sensor": sensor_row,
         }
 
@@ -339,13 +431,16 @@ def execute_user_code(
             # Keep existing data if code fails; surface error with failing tick.
             return setpoints_df, f"Time {int(tick)}: {exc}"
 
+    # Return fully computed setpoint table and no error.
     return updated, None
 
 
 # Streamlit page setup should happen before most UI rendering.
+# Configure a wide layout so side-by-side panels fit comfortably.
 st.set_page_config(layout="wide")
 
 # Hide Streamlit menu + deploy button
+# Define custom CSS to hide default Streamlit chrome.
 hide_streamlit_style = """
 <style>
 #MainMenu {visibility: hidden;}
@@ -354,6 +449,7 @@ footer {visibility: hidden;}
 [data-testid="stToolbar"] {display: none;}
 </style>
 """
+# Inject CSS into page.
 st.markdown(hide_streamlit_style, unsafe_allow_html=True)
 
 # Make output metric cards larger and prevent text clipping for long numeric values.
@@ -404,9 +500,11 @@ ensure_state()
 
 # Discover available log files for dropdown.
 log_paths = list_log_files()
+# Convert file paths to plain filenames for selectbox options.
 log_options = [path.name for path in log_paths]
 
 if not log_options:
+    # Inform the user that no input data is currently available.
     st.warning("No CSV logs found in ./logs. Add logs to enable sensor playback.")
 
 if st.session_state["selected_log"] not in log_options and log_options:
@@ -414,12 +512,14 @@ if st.session_state["selected_log"] not in log_options and log_options:
     st.session_state["selected_log"] = log_options[0]
 
 with st.container():
+    # Top row layout: log controls, timeline controls, stats, and project title.
     log_col, timing_col, download_col, logo_col = st.columns([2, 3, 1, 2])
 
     with log_col:
         # Left-side controls for selecting/opening input logs.
         log_col_selector, log_col_link = st.columns([5, 1])
         with log_col_selector:
+            # Dropdown of discovered log files.
             selected_option = st.selectbox(
                 "Select Log:",
                 log_options if log_options else ["No logs available"],
@@ -433,26 +533,38 @@ with st.container():
 
             if log_options:
                 # Load selected CSV.
+                # Resolve selected filename to full path object.
                 selected_path = next(path for path in log_paths if path.name == st.session_state["selected_log"])
+                # Parse and normalize selected sensor log file.
                 loaded_sensor_df = load_sensor_log(selected_path)
                 if (
                     st.session_state["sensor_log_df"].empty
                     or st.session_state["selected_log"] != st.session_state.get("loaded_log_name")
                 ):
                     # Only reset tables when switching logs (not every rerun).
+                    # Store sensor dataframe used by Sensors tab and code runtime.
                     st.session_state["sensor_log_df"] = loaded_sensor_df
+                    # Rebuild setpoint table to align with new sensor timeline.
                     st.session_state["processed_setpoints_df"] = init_setpoints_from_sensor_log(loaded_sensor_df)
+                    # Cache maximum available timeline tick for slider bounds.
                     st.session_state["max_time"] = int(loaded_sensor_df["Time"].max()) if not loaded_sensor_df.empty else 0
+                    # Keep current_time valid relative to newly loaded data.
                     st.session_state["current_time"] = clamp_time(st.session_state["current_time"], st.session_state["max_time"])
+                    # Keep timeline slider widget synchronized.
                     st.session_state["timeline_slider"] = st.session_state["current_time"]
+                    # Trigger auto-apply of code against newly loaded data.
                     st.session_state["code_needs_auto_apply"] = True
+                    # Track which log is currently loaded to avoid redundant resets.
                     st.session_state["loaded_log_name"] = st.session_state["selected_log"]
 
         with log_col_link:
             if log_options:
+                # Recompute selected path for link button target.
                 selected_path = next(path for path in log_paths if path.name == st.session_state["selected_log"])
+                # Open CSV via file:// URL in a new tab.
                 st.link_button("", selected_path.resolve().as_uri(), icon="↗️", help="Open log CSV in new tab")
             else:
+                # Placeholder button when no logs exist.
                 st.button("", icon="↗️", disabled=True)
 
     with timing_col:
@@ -464,38 +576,43 @@ with st.container():
         )
 
         with timing_col_reset:
+            # Jump timeline back to zero.
             st.button(
                 "🔃",
                 help="Reset timeline",
-                use_container_width=True,
+                width="stretch",
                 on_click=handle_reset,
                 key="timeline_reset_btn",
             )
 
         with timing_col_backstep:
+            # Move timeline back by one tick.
             st.button(
                 "⬅️",
                 help="Step back",
-                use_container_width=True,
+                width="stretch",
                 on_click=handle_backstep,
                 key="timeline_backstep_btn",
             )
 
         with timing_col_play:
+            # Choose icon based on play state.
             play_label = "⏸️" if st.session_state["play"] else "▶️"
+            # Toggle playback loop.
             st.button(
                 play_label,
                 help="Play/Pause",
-                use_container_width=True,
+                width="stretch",
                 on_click=handle_toggle_play,
                 key="timeline_play_btn",
             )
 
         with timing_col_frontstep:
+            # Move timeline forward by one tick.
             st.button(
                 "➡️",
                 help="Step forward",
-                use_container_width=True,
+                width="stretch",
                 on_click=handle_frontstep,
                 key="timeline_frontstep_btn",
             )
@@ -504,10 +621,12 @@ with st.container():
             # Keep speed label + control on one tight horizontal line on the right.
             # make the text right next to the slider, and vertically centered with the buttons to the left.
 
-            speed_label_col, speed_slider_col = st.columns([3, 7], vertical_alignment="center", gap="small")
+            speed_label_col, speed_slider_col = st.columns([3.5, 7], vertical_alignment="center", gap="small")
             with speed_label_col:
+                # Display speed label near slider.
                 speed_label_col.markdown("**Ticks/s:**")
             with speed_slider_col:
+                # Let user control playback speed in whole ticks per second.
                 speed_value = st.slider(
                     "Ticks/sec",
                     min_value=1.0,
@@ -517,14 +636,17 @@ with st.container():
                     label_visibility="collapsed",
                     width="stretch"
                 )
+            # Persist selected playback speed.
             st.session_state["ticks_per_second"] = float(speed_value)
 
         # Primary timeline slider.
         # Disabled during playback so only one source controls time movement.
         # IMPORTANT: update widget state before instantiation in this run.
         if st.session_state.get("timeline_slider") != st.session_state["current_time"]:
+            # Keep slider value synced with canonical timeline value.
             st.session_state["timeline_slider"] = st.session_state["current_time"]
 
+        # Main interactive timeline slider.
         st.slider(
             "Timeline",
             0,
@@ -538,23 +660,30 @@ with st.container():
 
     with download_col:
         # Quick run stats.
+        # Show current position in timeline.
         st.caption(f"Time: {st.session_state['current_time']} / {st.session_state['max_time']}")
         # st.caption(f"Rows: {len(st.session_state['sensor_log_df'])}")
+        # Show playback speed setting.
         st.caption(f"Speed: {st.session_state['ticks_per_second']:.1f} ticks/sec")
 
     with logo_col:
+        # Project header with repo link.
         st.subheader("CWRU Baja - [cwru-baja](https://github.com/cwru-baja)", divider="red")
 
+    # Separate top controls from main content area.
     st.divider()
 
+# Pull key dataframes/state values into local variables for readability.
 sensor_log_df = st.session_state["sensor_log_df"]
 processed_setpoints_df = st.session_state["processed_setpoints_df"]
 current_time = st.session_state["current_time"]
 max_time = st.session_state["max_time"]
 
 with st.container():
+    # Main split view: input tools on left, output metrics on right.
     input_col, output_col = st.columns(2)
     with input_col:
+        # Input pane includes sensors, code editor, and documentation tabs.
         st.subheader("Input", divider="green")
         sensors_tab, code_tab, docs_tab = st.tabs(["Sensors", "Code", "Docs"], default="Code")
 
@@ -562,14 +691,17 @@ with st.container():
             # Build a display table from one row of sensor data at current time.
             # We rotate from "wide" (columns are sensors) to a 2-column table.
             sensor_row = get_row_at_time(sensor_log_df, current_time)
+            # Exclude Time from sensor name list so table only shows actual channels.
             sensor_names = [name for name in sensor_row.index if name != "Time"]
+            # Build long-form table for cleaner display in Streamlit.
             sensors_df = pd.DataFrame(
                 {
                     "Name": sensor_names,
                     "Value": [sensor_row[name] for name in sensor_names],
                 }
             )
-            st.dataframe(sensors_df, hide_index=True, use_container_width=True)
+            # Render sensor name/value table.
+            st.dataframe(sensors_df, hide_index=True, width="stretch")
 
             # Read-only mirror slider to show synchronized time in this tab.
             st.slider(
@@ -584,6 +716,7 @@ with st.container():
 
         with code_tab:
             # User code editor for setpoint rules.
+            # Keep editor content in session_state key code_text.
             code_text = st.text_area(
                 "Code Area",
                 key="code_text",
@@ -601,6 +734,7 @@ set_each(
             )
 
             # Prepare an "apply" result so save can always export the latest computed output.
+            # Run user code now so both Apply and Save use the same computed result.
             prepared_df, prepared_error = execute_user_code(
                 code_text,
                 current_time,
@@ -610,12 +744,18 @@ set_each(
 
             if st.session_state.get("code_needs_auto_apply", False):
                 if prepared_error:
+                    # Cache error and avoid overwriting output dataframe when code fails.
                     st.session_state["auto_apply_error"] = prepared_error
                 else:
+                    # Persist computed setpoints into app state.
                     st.session_state["processed_setpoints_df"] = prepared_df
+                    # Clear previous error if this apply succeeded.
                     st.session_state["auto_apply_error"] = None
+                    # Track source code text that produced current output dataframe.
                     st.session_state["last_auto_applied_code_text"] = st.session_state["code_text"]
+                    # Track log file paired with last successful apply.
                     st.session_state["last_auto_applied_log_name"] = st.session_state.get("selected_log")
+                # Consume the auto-apply request flag for this rerun.
                 st.session_state["code_needs_auto_apply"] = False
 
             # Keep Apply and Save on the same row.
@@ -623,43 +763,59 @@ set_each(
 
             with apply_col:
                 # Apply current code across all timeline ticks.
-                if st.button("Apply to all times", use_container_width=True):
+                if st.button("Apply to all times", width="stretch"):
                     if prepared_error:
+                        # Surface runtime error from execute_user_code.
                         st.error(f"Code error: {prepared_error}")
                     else:
+                        # Persist successful apply result.
                         st.session_state["processed_setpoints_df"] = prepared_df
+                        # Clear stale auto-apply error state.
                         st.session_state["auto_apply_error"] = None
+                        # Store latest successful source code snapshot.
                         st.session_state["last_auto_applied_code_text"] = st.session_state["code_text"]
+                        # Store log context used for that code snapshot.
                         st.session_state["last_auto_applied_log_name"] = st.session_state.get("selected_log")
+                        # Confirm successful processing to the user.
                         st.success("Applied code across all times")
 
             with save_col:
                 # Save downloads CSV that includes the same apply logic first.
+                # Button stays disabled while code contains errors.
                 save_clicked = st.download_button(
                     "Save (apply + download)",
                     data=prepared_df.to_csv(index=False).encode("utf-8") if not prepared_error else b"",
                     file_name="processed_setpoints.csv",
                     mime="text/csv",
-                    use_container_width=True,
+                    width="stretch",
                     disabled=prepared_error is not None,
                 )
 
                 if save_clicked and not prepared_error:
+                    # Keep in-memory output aligned with downloaded content.
                     st.session_state["processed_setpoints_df"] = prepared_df
+                    # Clear stale errors after successful save/apply.
                     st.session_state["auto_apply_error"] = None
+                    # Track current code as last successful apply source.
                     st.session_state["last_auto_applied_code_text"] = st.session_state["code_text"]
+                    # Track active log name for reproducibility.
                     st.session_state["last_auto_applied_log_name"] = st.session_state.get("selected_log")
+                    # Notify user of combined apply+download success.
                     st.success("Applied code across all times and downloaded CSV")
 
             if prepared_error:
+                # Explain why save is disabled.
                 st.caption(f"Save disabled until code is valid. Latest error: {prepared_error}")
 
             if st.session_state.get("auto_apply_error"):
+                # Show sticky auto-apply status when code has unresolved issues.
                 st.caption(f"Auto-apply paused due to code error: {st.session_state['auto_apply_error']}")
 
+            # Guide user toward in-app API and examples.
             st.caption("See the Docs tab for available functions and example scripts.")
 
         with docs_tab:
+            # In-app API docs and examples for user code authoring.
             st.subheader("Documentation")
 
             st.markdown("### What this code runner does")
@@ -841,8 +997,10 @@ print(st.session_state)
             )
 
     with output_col:
+        # Output pane visualizes computed suspension setpoints.
         st.subheader("Output", divider="orange")
 
+        # Center output metrics and car image with surrounding spacing columns.
         _, live_output, car_img, _ = st.columns([1, 6, 3, 1])
 
         with live_output:
@@ -850,37 +1008,46 @@ print(st.session_state)
             setpoint_row = get_row_at_time(st.session_state["processed_setpoints_df"], current_time)
             previous_row = get_previous_row(st.session_state["processed_setpoints_df"], current_time)
 
+            # Parse current tick values, defaulting safely when missing.
             FL_setpoint = float(setpoint_row.get("FL_Setpoint", DEFAULT_SETPOINT))
             FR_setpoint = float(setpoint_row.get("FR_Setpoint", DEFAULT_SETPOINT))
             BL_setpoint = float(setpoint_row.get("BL_Setpoint", DEFAULT_SETPOINT))
             BR_setpoint = float(setpoint_row.get("BR_Setpoint", DEFAULT_SETPOINT))
 
+            # Compute deltas from previous tick for metric trend arrows.
             FL_delta = FL_setpoint - float(previous_row.get("FL_Setpoint", FL_setpoint))
             FR_delta = FR_setpoint - float(previous_row.get("FR_Setpoint", FR_setpoint))
             BL_delta = BL_setpoint - float(previous_row.get("BL_Setpoint", BL_setpoint))
             BR_delta = BR_setpoint - float(previous_row.get("BR_Setpoint", BR_setpoint))
 
+            # Arrange front and rear wheel metric cards.
             FL_cell, FR_cell = st.columns(2, vertical_alignment="center")
             BL_cell, BR_cell = st.columns(2)
 
             with FL_cell:
+                # Front-left metric card.
                 st.metric(label="FL", value=f"{FL_setpoint:.2f}", delta=f"{FL_delta:+.2f}")
 
             with FR_cell:
+                # Front-right metric card.
                 st.metric(label="FR", value=f"{FR_setpoint:.2f}", delta=f"{FR_delta:+.2f}")
 
             with BL_cell:
+                # Rear-left metric card.
                 st.metric(label="BL", value=f"{BL_setpoint:.2f}", delta=f"{BL_delta:+.2f}")
 
             with BR_cell:
+                # Rear-right metric card.
                 st.metric(label="BR", value=f"{BR_setpoint:.2f}", delta=f"{BR_delta:+.2f}")
 
         with car_img:
+            # Decorative top-down car reference image.
             st.image(
                 "https://png.pngtree.com/png-vector/20230110/ourmid/pngtree-car-top-view-image-png-image_6557068.png",
                 width="stretch",
             )
 
+        # Read-only mirror of current output timeline position.
         st.slider(
             "Suspension_Timeline",
             0,
@@ -893,9 +1060,14 @@ print(st.session_state)
 
 if st.session_state["play"]:
     # Keep playback moving at configured ticks-per-second while preserving user controls.
+    # Guard against invalid or zero speed values.
     ticks_per_second = max(float(st.session_state.get("ticks_per_second", 1.0)), 0.1)
+    # Wait exactly one frame interval for configured playback speed.
     time.sleep(1.0 / ticks_per_second)
+    # Advance timeline by one tick.
     sync_timeline_time(st.session_state["current_time"] + 1)
     if st.session_state["current_time"] >= st.session_state["max_time"]:
+        # Stop automatically when reaching end of timeline.
         st.session_state["play"] = False
+    # Trigger a new run so UI reflects updated timeline position.
     st.rerun()
